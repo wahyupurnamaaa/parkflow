@@ -1,0 +1,85 @@
+x-backend: &backend
+  build: ./backend
+  environment: &environment
+    APP_NAME: ParkFlow
+    APP_ENV: ${APP_ENV:-production}
+    APP_DEBUG: "false"
+    APP_KEY: ${APP_KEY:?Generate APP_KEY first, see README}
+    APP_URL: ${APP_URL:-http://localhost:8080}
+    DB_CONNECTION: pgsql
+    DB_HOST: postgres
+    DB_PORT: 5432
+    DB_DATABASE: parkflow
+    DB_USERNAME: parkflow
+    DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+    CACHE_STORE: redis
+    SESSION_DRIVER: redis
+    SESSION_SECURE_COOKIE: ${SESSION_SECURE_COOKIE:-false}
+    QUEUE_CONNECTION: redis
+    REDIS_HOST: redis
+    REDIS_CLIENT: phpredis
+    LOG_CHANNEL: stderr
+    DEMO_SEED: ${DEMO_SEED:-false}
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: parkflow
+      POSTGRES_USER: parkflow
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U parkflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  init:
+    <<: *backend
+    command: ["sh", "-c", "php artisan migrate --force && if [ \"$$DEMO_SEED\" = \"true\" ]; then php artisan db:seed --force; fi"]
+  backend:
+    <<: *backend
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+  worker:
+    <<: *backend
+    command: ["php", "artisan", "queue:work", "--sleep=3", "--tries=3", "--timeout=90"]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+  frontend:
+    build: ./frontend
+  nginx:
+    image: nginx:1.28-alpine
+    ports:
+      - "127.0.0.1:${PORT:-8080}:80"
+    volumes:
+      - ./infrastructure/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - backend
+      - frontend
+volumes:
+  postgres-data:
+  redis-data:

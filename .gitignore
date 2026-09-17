@@ -1,0 +1,12 @@
+.env
+node_modules/
+.next/
+/vendor/
+backend/vendor/
+backend/.env
+backend/database/*.sqlite*
+backend/storage/logs/*
+backend/storage/framework/sessions/*
+backend/storage/framework/views/*
+frontend/test-results/
+frontend/playwright-report/
