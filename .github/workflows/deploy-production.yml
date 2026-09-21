@@ -1,0 +1,225 @@
+name: Deploy to Production (FREE TIER)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '22'
+  PHP_VERSION: '8.4'
+
+jobs:
+  # ===========================================
+  # JOB 1: Test & Lint
+  # ===========================================
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Backend Tests
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: mbstring, pdo, pdo_pgsql, redis
+
+      - name: Cache Composer
+        uses: actions/cache@v4
+        with:
+          path: ~/.composer/cache
+          key: composer-${{ runner.os }}-${{ hashFiles('backend/composer.lock') }}
+
+      - name: Install Backend Dependencies
+        run: composer install --no-interaction --prefer-dist
+        working-directory: backend
+
+      - name: Run Backend Tests
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+          php artisan test
+        working-directory: backend
+
+      # Frontend Tests
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Frontend Dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: TypeScript Check
+        run: npm run typecheck
+        working-directory: frontend
+
+      - name: Build Frontend
+        run: npm run build
+        working-directory: frontend
+
+  # ===========================================
+  # JOB 2: Deploy Frontend to Vercel
+  # ===========================================
+  deploy-frontend:
+    runs-on: ubuntu-latest
+    needs: quality
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Vercel CLI
+        run: npm install -g vercel
+
+      - name: Pull Vercel Project Settings
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          cd frontend
+          vercel pull yes \
+            --environment=production \
+            --token=$VERCEL_TOKEN \
+            --orgId=$VERCEL_ORG_ID \
+            --projectId=$VERCEL_PROJECT_ID
+
+      - name: Build Frontend
+        env:
+          API_URL: ${{ secrets.API_URL }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          cd frontend
+          vercel build prod \
+            --token=$VERCEL_TOKEN
+
+      - name: Deploy to Vercel
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          cd frontend
+          vercel deploy --prebuilt \
+            --prod \
+            --token=$VERCEL_TOKEN
+
+  # ===========================================
+  # JOB 3: Deploy Backend to AWS EC2
+  # ===========================================
+  deploy-backend:
+    runs-on: ubuntu-latest
+    needs: quality
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH Key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add EC2 to known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.AWS_EC2_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Deploy to EC2 via SSH
+        env:
+          RDS_HOST: ${{ secrets.AWS_RDS_HOST }}
+          REDIS_HOST: ${{ secrets.AWS_ELASTICACHE_HOST }}
+          DB_PASSWORD: ${{ secrets.RDS_PASSWORD }}
+          EC2_USER: ubuntu
+        run: |
+          ssh -o StrictHostKeyChecking=no $EC2_USER@${{ secrets.AWS_EC2_HOST }} << 'ENDSSH'
+            set -e
+
+            echo "🚀 Starting ParkFlow Backend Deployment..."
+
+            # Navigate to project
+            cd /var/www/parkflow
+
+            # Pull latest code
+            git pull origin main
+
+            # Update backend environment
+            cd backend
+
+            # Update .env with new values
+            sed -i "s|DB_HOST=.*|DB_HOST=${RDS_HOST}|" .env
+            sed -i "s|DB_PASSWORD=.*|DB_PASSWORD=${DB_PASSWORD}|" .env
+            sed -i "s|REDIS_HOST=.*|REDIS_HOST=${REDIS_HOST}|" .env
+
+            echo "✅ Environment variables updated"
+
+            # Stop existing containers
+            docker compose down || true
+
+            # Build and start containers
+            docker compose up -d --build
+
+            echo "⏳ Waiting for database..."
+            sleep 10
+
+            # Run migrations
+            docker compose exec backend php artisan migrate --force
+
+            # Clear caches
+            docker compose exec backend php artisan config:cache
+            docker compose exec backend php artisan route:cache
+            docker compose exec backend php artisan view:cache
+
+            # Restart services
+            docker compose restart
+
+            echo "✅ Backend deployed successfully!"
+            echo "🌐 API URL: https://api-parkflow.wahyupurnamaa.com"
+
+            # Show status
+            docker compose ps
+          ENDSSH
+
+  # ===========================================
+  # JOB 4: Verify Deployment
+  # ===========================================
+  verify:
+    runs-on: ubuntu-latest
+    needs: [deploy-frontend, deploy-backend]
+    steps:
+      - name: Verify Backend API
+        run: |
+          echo "🔍 Testing Backend API..."
+          curl -f https://api-parkflow.wahyupurnamaa.com/health || exit 1
+          echo "✅ Backend API is healthy!"
+
+      - name: Verify Frontend
+        run: |
+          echo "🔍 Testing Frontend..."
+          curl -f https://parkflow.wahyupurnamaa.com || exit 1
+          echo "✅ Frontend is accessible!"
+
+      - name: Deployment Summary
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "✅ PARKFLOW DEPLOYMENT COMPLETE!"
+          echo "=========================================="
+          echo ""
+          echo "🌐 Frontend: https://parkflow.wahyupurnamaa.com"
+          echo "🔗 Backend API: https://api-parkflow.wahyupurnamaa.com"
+          echo ""
+          echo "📊 Dashboard:"
+          echo "   - Vercel: https://vercel.com/dashboard"
+          echo "   - AWS EC2: https://console.aws.amazon.com/ec2"
+          echo "   - AWS RDS: https://console.aws.amazon.com/rds"
+          echo ""
