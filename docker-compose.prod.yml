@@ -1,51 +1,17 @@
-version: '3.8'
-
 # ===========================================
 # PARKFLOW PRODUCTION DOCKER COMPOSE
 # For AWS EC2 deployment
+# Uses Docker Redis (free forever, no ElastiCache needed)
 # ===========================================
-
-x-backend-base: &backend-base
-  build:
-    context: ./backend
-    dockerfile: Dockerfile
-    target: production
-  restart: unless-stopped
-  security_opt:
-    - no-new-privileges:true
-  networks:
-    - parkflow-network
 
 services:
   # ===========================================
-  # PostgreSQL Database (Local fallback)
-  # ===========================================
-  postgres:
-    image: postgres:17-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: parkflow
-      POSTGRES_USER: parkflow
-      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U parkflow -d parkflow"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - parkflow-network
-    profiles:
-      - local  # Only start with: docker compose --profile local up
-
-  # ===========================================
-  # Redis Cache (Local fallback)
+  # Redis Cache (Docker - always on)
   # ===========================================
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    command: redis-server --appendonly yes --maxmemory 128mb --maxmemory-policy allkeys-lru
     volumes:
       - redis-data:/data
     healthcheck:
@@ -55,58 +21,31 @@ services:
       retries: 3
     networks:
       - parkflow-network
-    profiles:
-      - local  # Only start with: docker compose --profile local up
 
   # ===========================================
   # Backend API (Production)
   # ===========================================
   backend:
-    <<: *backend-base
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: production
     container_name: parkflow-backend
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    env_file:
+      - ./backend/.env
     environment:
-      APP_NAME: ParkFlow
-      APP_ENV: ${APP_ENV:-production}
-      APP_DEBUG: "false"
-      APP_KEY: ${APP_KEY:?Generate APP_KEY first}
-      APP_URL: ${APP_URL:-https://parkflow.wahyupurnamaa.com}
-
-      # Database (AWS RDS in production)
-      DB_CONNECTION: ${DB_CONNECTION:-pgsql}
-      DB_HOST: ${DB_HOST:-postgres}
-      DB_PORT: ${DB_PORT:-5432}
-      DB_DATABASE: ${DB_DATABASE:-parkflow}
-      DB_USERNAME: ${DB_USERNAME:-parkflow}
-      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD}
-
-      # Cache (AWS ElastiCache in production)
-      CACHE_STORE: ${CACHE_STORE:-redis}
-      SESSION_DRIVER: ${SESSION_DRIVER:-redis}
-      SESSION_SECURE_COOKIE: "true"
-      QUEUE_CONNECTION: ${QUEUE_CONNECTION:-redis}
-      REDIS_HOST: ${REDIS_HOST:-redis}
-      REDIS_PORT: ${REDIS_PORT:-6379}
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
-      REDIS_CLIENT: ${REDIS_CLIENT:-phpredis}
-
-      # Logging
-      LOG_CHANNEL: stderr
-      LOG_LEVEL: warning
-
-      # Demo Mode (disable in production)
-      DEMO_SEED: ${DEMO_SEED:-false}
-
+      # Override Redis to use Docker container
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
     ports:
-      - "8443:8443"
+      - "127.0.0.1:8443:8443"
     depends_on:
-      postgres:
-        condition: service_healthy
-        profiles:
-          - local
       redis:
         condition: service_healthy
-        profiles:
-          - local
     networks:
       - parkflow-network
 
@@ -114,34 +53,53 @@ services:
   # Queue Worker
   # ===========================================
   worker:
-    <<: *backend-base
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: production
     container_name: parkflow-worker
-    command: ["php", "artisan", "queue:work", "--sleep=3", "--tries=3", "--timeout=90", "--max-time=3600"]
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    env_file:
+      - ./backend/.env
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
+    command: ["php", "artisan", "queue:work", "--sleep=3", "--tries=3", "--timeout=90", "--max-time=3600"]
     depends_on:
       backend:
         condition: service_started
       redis:
         condition: service_healthy
-        profiles:
-          - local
     networks:
       - parkflow-network
     deploy:
-      replicas: 1
       resources:
         limits:
           cpus: '0.5'
-          memory: 512M
+          memory: 256M
 
   # ===========================================
   # Scheduler (Laravel Task Scheduling)
   # ===========================================
   scheduler:
-    <<: *backend-base
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: production
     container_name: parkflow-scheduler
-    command: ["sh", "-c", "php artisan schedule:run"]
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    env_file:
+      - ./backend/.env
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
+    command: ["sh", "-c", "while true; do php artisan schedule:run --verbose --no-interaction; sleep 60; done"]
     depends_on:
       backend:
         condition: service_started
@@ -153,7 +111,5 @@ networks:
     driver: bridge
 
 volumes:
-  postgres-data:
-    driver: local
   redis-data:
     driver: local

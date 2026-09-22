@@ -1,0 +1,185 @@
+name: Deploy to Hostinger (Auto)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '22'
+  PHP_VERSION: '8.4'
+
+jobs:
+  # ===========================================
+  # JOB 1: Test & Build Quality
+  # ===========================================
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Backend Tests
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: mbstring, pdo, pdo_pgsql, pdo_sqlite, redis
+
+      - name: Cache Composer
+        uses: actions/cache@v4
+        with:
+          path: ~/.composer/cache
+          key: composer-${{ runner.os }}-${{ hashFiles('backend/composer.lock') }}
+
+      - name: Install Backend Dependencies
+        run: composer install --no-interaction --prefer-dist
+        working-directory: backend
+
+      - name: Run Backend Tests
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+          php artisan test
+        working-directory: backend
+
+      # Frontend Tests
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Frontend Dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: TypeScript Check
+        run: npm run typecheck
+        working-directory: frontend
+
+      - name: Build Frontend
+        run: npm run build
+        working-directory: frontend
+
+  # ===========================================
+  # JOB 2: Deploy to Hostinger via FTP
+  # ===========================================
+  deploy:
+    runs-on: ubuntu-latest
+    needs: quality
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup FTP
+        run: |
+          pip install pycurl
+
+      - name: Create Deployment Package
+        run: |
+          mkdir -p deploy-package
+
+          # Copy backend (Laravel)
+          cp -r backend/* deploy-package/
+
+          # Copy frontend build output
+          cp -r frontend/.next deploy-package/
+          cp -r frontend/public deploy-package/
+
+          # Copy root files
+          cp -r *.md deploy-package/ 2>/dev/null || true
+          cp compose.yaml deploy-package/ 2>/dev/null || true
+
+          # Remove unnecessary files
+          rm -rf deploy-package/.git
+          rm -rf deploy-package/node_modules
+          rm -rf deploy-package/vendor/.git
+          rm -rf deploy-package/storage/*.key
+
+          # Create version info
+          echo "Deployed at: $(date)" > deploy-package/version.txt
+          echo "Commit: ${{ github.sha }}" >> deploy-package/version.txt
+
+          # Show what's being deployed
+          echo "=== Deployment Package Contents ==="
+          ls -la deploy-package/
+          echo ""
+          echo "=== Backend Structure ==="
+          ls -la deploy-package/
+
+      - name: Deploy to Hostinger via FTP
+        uses: SamKirkland/FTP-Deploy-Action@v4.3
+        with:
+          server: ${{ secrets.FTP_HOST }}
+          username: ${{ secrets.FTP_USERNAME }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          local-dir: ./deploy-package/
+          server-dir: /public_html/
+          git-depth: 0
+
+      - name: Deploy Backend via SSH (Alternative Method)
+        if: false  # Set to true if you have SSH access
+        run: |
+          echo "Deploying via SSH..."
+          # This would be used if Hostinger provides SSH access
+
+  # ===========================================
+  # JOB 3: Run Laravel Commands via SSH
+  # ===========================================
+  post-deploy:
+    runs-on: ubuntu-latest
+    needs: deploy
+    steps:
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Clear Laravel Cache
+        if: false  # Set to true if SSH access available
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << 'ENDSSH'
+            cd /var/www/html/parkflow/backend
+            php artisan config:cache
+            php artisan route:cache
+            php artisan view:cache
+            php artisan migrate --force || echo "Migration skipped"
+            echo "✅ Laravel cache cleared!"
+          ENDSSH
+
+  # ===========================================
+  # JOB 4: Verify Deployment
+  # ===========================================
+  verify:
+    runs-on: ubuntu-latest
+    needs: deploy
+    steps:
+      - name: Verify Website
+        run: |
+          echo "🔍 Testing ParkFlow website..."
+
+          # Test main site
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" https://wahyupurnamaa.com)
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Website is accessible (HTTP $HTTP_CODE)"
+          else
+            echo "⚠️ Website returned HTTP $HTTP_CODE"
+          fi
+
+          # Test API health if available
+          API_CODE=$(curl -s -o /dev/null -w "%{http_code}" https://wahyupurnamaa.com/api/health 2>/dev/null || echo "000")
+          echo "🔗 API Health: HTTP $API_CODE"
+
+      - name: Deployment Summary
+        run: |
+          echo ""
+          echo "============================================"
+          echo "✅ PARKFLOW AUTO-DEPLOY COMPLETE!"
+          echo "============================================"
+          echo ""
+          echo "🌐 Website: https://wahyupurnamaa.com"
+          echo "📝 Commit: ${{ github.sha }}"
+          echo "👤 Author: ${{ github.actor }}"
+          echo "⏰ Deployed at: $(date)"
+          echo ""

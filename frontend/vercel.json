@@ -7,27 +7,6 @@
   "regions": ["sin1"],
   "headers": [
     {
-      "source": "/api/(.*)",
-      "headers": [
-        {
-          "key": "Access-Control-Allow-Origin",
-          "value": "https://parkflow.wahyupurnamaa.com"
-        },
-        {
-          "key": "Access-Control-Allow-Methods",
-          "value": "GET, POST, PUT, DELETE, OPTIONS"
-        },
-        {
-          "key": "Access-Control-Allow-Headers",
-          "value": "Content-Type, Authorization, X-Requested-With, Accept"
-        },
-        {
-          "key": "Access-Control-Allow-Credentials",
-          "value": "true"
-        }
-      ]
-    },
-    {
       "source": "/(.*)",
       "headers": [
         {
@@ -49,15 +28,7 @@
       ]
     }
   ],
-  "rewrites": [
-    {
-      "source": "/api/:path*",
-      "destination": "https://YOUR_EC2_PUBLIC_IP:8443/api/:path*"
-    }
-  ],
   "env": {
-    "NEXT_PUBLIC_API_URL": {
-      "fromEnv": "API_URL"
-    }
+    "NEXT_PUBLIC_API_URL": "https://api-parkflow.wahyupurnamaa.com"
   }
 }

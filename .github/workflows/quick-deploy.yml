@@ -1,0 +1,84 @@
+name: Quick Deploy (Skip Tests)
+
+# Deploy FAST without running tests - for hotfixes only
+# Use deploy-hostinger.yml for normal deployments
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_message:
+        description: 'Commit message or change description'
+        required: false
+        default: 'Quick hotfix deployment'
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Frontend Dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Build Frontend
+        run: npm run build
+        working-directory: frontend
+
+      - name: Install Backend Dependencies
+        run: composer install --no-interaction --prefer-dist --no-dev
+        working-directory: backend
+
+      - name: Create Deployment Package
+        run: |
+          mkdir -p deploy-package
+
+          # Copy backend (Laravel)
+          cp -r backend/* deploy-package/
+
+          # Copy frontend build output
+          cp -r frontend/.next deploy-package/
+          cp -r frontend/public deploy-package/
+
+          # Remove unnecessary files
+          rm -rf deploy-package/.git
+          rm -rf deploy-package/node_modules
+          rm -rf deploy-package/vendor/.git
+
+          # Create version info
+          echo "Quick Deploy at: $(date)" > deploy-package/version.txt
+          echo "Commit: ${{ github.sha }}" >> deploy-package/version.txt
+          echo "Triggered by: ${{ github.actor }}" >> deploy-package/version.txt
+
+      - name: Deploy to Hostinger via FTP
+        uses: SamKirkland/FTP-Deploy-Action@v4.3
+        with:
+          server: ${{ secrets.FTP_HOST }}
+          username: ${{ secrets.FTP_USERNAME }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          local-dir: ./deploy-package/
+          server-dir: /public_html/
+          git-depth: 0
+
+      - name: Deployment Complete
+        run: |
+          echo ""
+          echo "============================================"
+          echo "🚀 QUICK DEPLOY COMPLETE!"
+          echo "============================================"
+          echo ""
+          echo "🌐 Website: https://wahyupurnamaa.com"
+          echo "👤 Triggered by: ${{ github.actor }}"
+          echo "⏰ Deployed at: $(date)"
+          echo ""
